@@ -53,6 +53,39 @@
       .join(" ");
   }
 
+  function getCleanText(el) {
+    if (!el) return "";
+
+    const ignoredTags = {
+      SCRIPT: true,
+      STYLE: true,
+      NOSCRIPT: true,
+      TEMPLATE: true,
+    };
+
+    function walk(node) {
+      if (!node) return "";
+
+      if (node.nodeType === Node.TEXT_NODE) {
+        return node.textContent || "";
+      }
+
+      if (node.nodeType !== Node.ELEMENT_NODE) {
+        return "";
+      }
+
+      if (ignoredTags[node.tagName]) {
+        return "";
+      }
+
+      return Array.from(node.childNodes)
+        .map(walk)
+        .join(" ");
+    }
+
+    return normalizeText(walk(el));
+  }
+
   function extractSku(text) {
     const normalized = normalizeText(text);
     const match = normalized.match(/Артикул\s*[:：]\s*([0-9A-Za-zА-Яа-яЁё_-]+)/i);
@@ -83,6 +116,28 @@
     );
   }
 
+  function sanitizeButtonText(text) {
+    const normalized = normalizeText(text);
+
+    if (!normalized) {
+      return CART_BUTTON_TEXT;
+    }
+
+    if (normalized.includes(CART_BUTTON_TEXT)) {
+      return CART_BUTTON_TEXT;
+    }
+
+    if (normalized.includes(DISABLED_BUTTON_TEXT)) {
+      return CART_BUTTON_TEXT;
+    }
+
+    if (normalized.length > 60) {
+      return CART_BUTTON_TEXT;
+    }
+
+    return normalized;
+  }
+
   function getPossibleCartButtons(scope) {
     if (!scope) {
       return [];
@@ -93,6 +148,60 @@
     );
   }
 
+  function findButtonLabelElement(button) {
+    if (!button) return null;
+
+    const selectors = [
+      ".t-btn__text",
+      ".tn-atom",
+      ".js-store-prod-popup-buy-btn-txt",
+      "span",
+    ];
+
+    for (const selector of selectors) {
+      const label = button.querySelector(selector);
+
+      if (!label) continue;
+      if (!isVisible(label)) continue;
+
+      const text = getCleanText(label);
+
+      if (!text) continue;
+      if (text.length > 80) continue;
+
+      return label;
+    }
+
+    return null;
+  }
+
+  function setButtonText(button, text) {
+    if (!button) return;
+
+    const directTextNodes = Array.from(button.childNodes).filter(function (node) {
+      return node.nodeType === Node.TEXT_NODE && normalizeText(node.textContent);
+    });
+
+    if (directTextNodes.length) {
+      directTextNodes[0].textContent = text;
+
+      directTextNodes.slice(1).forEach(function (node) {
+        node.textContent = "";
+      });
+
+      return;
+    }
+
+    const label = findButtonLabelElement(button);
+
+    if (label) {
+      label.textContent = text;
+      return;
+    }
+
+    button.textContent = text;
+  }
+
   function hasCartButtonInScope(scope) {
     return getPossibleCartButtons(scope).some(function (el) {
       if (!isVisible(el)) return false;
@@ -101,16 +210,23 @@
         return true;
       }
 
-      return isCartButtonText(el.textContent);
+      const text = getCleanText(el);
+
+      if (!isCartButtonText(text)) {
+        return false;
+      }
+
+      return text.length <= 120;
     });
   }
 
   function restoreCartButton(button) {
     if (!button) return;
 
-    const originalText = button.dataset.konturOriginalText || CART_BUTTON_TEXT;
+    const originalText = sanitizeButtonText(button.dataset.konturOriginalText);
 
-    button.textContent = originalText;
+    setButtonText(button, originalText);
+
     button.disabled = false;
     button.removeAttribute("aria-disabled");
 
@@ -156,7 +272,7 @@
         continue;
       }
 
-      const text = normalizeText(current.textContent);
+      const text = getCleanText(current);
 
       const hasArticle = text.includes("Артикул");
       const hasOptions =
@@ -176,14 +292,14 @@
 
   function getArticleTextForElement(el) {
     const ownText = normalizeText(getOwnText(el));
-    const fullText = normalizeText(el.textContent);
+    const cleanText = getCleanText(el);
 
     if (extractSku(ownText)) {
       return ownText;
     }
 
-    if (fullText.length <= 90 && extractSku(fullText)) {
-      return fullText;
+    if (cleanText.length <= 90 && extractSku(cleanText)) {
+      return cleanText;
     }
 
     return "";
@@ -267,17 +383,41 @@
       return null;
     }
 
-    const candidates = getPossibleCartButtons(scope);
+    const candidates = getPossibleCartButtons(scope)
+      .filter(function (el) {
+        if (!isVisible(el)) return false;
 
-    return candidates.find(function (el) {
-      if (!isVisible(el)) return false;
+        if (el.dataset && el.dataset.konturStockButton === "1") {
+          return true;
+        }
 
-      if (el.dataset && el.dataset.konturStockButton === "1") {
-        return true;
-      }
+        const text = getCleanText(el);
 
-      return isCartButtonText(el.textContent);
-    }) || null;
+        if (!isCartButtonText(text)) {
+          return false;
+        }
+
+        return text.length <= 120;
+      })
+      .map(function (el) {
+        const rect = el.getBoundingClientRect();
+
+        return {
+          element: el,
+          text: getCleanText(el),
+          area: rect.width * rect.height,
+        };
+      });
+
+    if (!candidates.length) {
+      return null;
+    }
+
+    candidates.sort(function (a, b) {
+      return a.area - b.area || a.text.length - b.text.length;
+    });
+
+    return candidates[0].element;
   }
 
   function setCartButtonAvailability(articleElement, available) {
@@ -290,12 +430,7 @@
     button.dataset.konturStockButton = "1";
 
     if (!button.dataset.konturOriginalText) {
-      const currentText = normalizeText(button.textContent);
-
-      button.dataset.konturOriginalText =
-        currentText && currentText !== DISABLED_BUTTON_TEXT
-          ? currentText
-          : CART_BUTTON_TEXT;
+      button.dataset.konturOriginalText = sanitizeButtonText(getCleanText(button));
     }
 
     if (!button.dataset.konturOriginalTabindex) {
@@ -315,16 +450,16 @@
       return;
     }
 
-    button.textContent = DISABLED_BUTTON_TEXT;
+    setButtonText(button, DISABLED_BUTTON_TEXT);
+
     button.disabled = true;
     button.setAttribute("aria-disabled", "true");
     button.setAttribute("tabindex", "-1");
 
-    /*
-      Не ставим pointer-events: none, потому что тогда клик может уйти
-      в родительские элементы Tilda. Вместо этого блокируем клик
-      через capture-обработчик blockDisabledCartClick().
-    */
+    if (button.tagName && button.tagName.toLowerCase() === "a") {
+      button.removeAttribute("href");
+    }
+
     button.style.pointerEvents = "auto";
     button.style.opacity = "0.45";
     button.style.cursor = "not-allowed";
@@ -468,10 +603,6 @@
 
       setStatus(statusEl, false, STATUS_UNKNOWN, true);
 
-      /*
-        Если API временно недоступен, кнопку не блокируем,
-        чтобы не остановить продажи из-за технической ошибки.
-      */
       setCartButtonAvailability(article.element, true);
     }
   }
@@ -579,10 +710,11 @@
             : null,
           button: button
             ? {
-                text: normalizeText(button.textContent),
+                text: getCleanText(button),
                 disabled: button.disabled === true,
                 ariaDisabled: button.getAttribute("aria-disabled"),
                 stockDisabled: button.dataset.konturStockDisabled,
+                href: button.getAttribute("href"),
               }
             : null,
           statuses: Array.from(document.querySelectorAll("." + STATUS_CLASS)).map(function (el) {
@@ -591,7 +723,7 @@
               sku: el.dataset.sku,
               loaded: el.dataset.loaded,
               available: el.dataset.available,
-              parentText: normalizeText(el.parentElement ? el.parentElement.textContent : "").slice(0, 200),
+              parentText: getCleanText(el.parentElement).slice(0, 200),
             };
           }),
         };
