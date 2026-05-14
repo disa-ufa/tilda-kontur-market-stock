@@ -19,6 +19,9 @@
   const STATUS_NOT_AVAILABLE = "Нет в наличии";
   const STATUS_UNKNOWN = "Наличие уточняется";
 
+  const CART_BUTTON_TEXT = "Добавить в корзину";
+  const DISABLED_BUTTON_TEXT = "Нет в наличии";
+
   window.__KonturStockCache = window.__KonturStockCache || new Map();
   window.__KonturStockPending = window.__KonturStockPending || new Map();
 
@@ -71,10 +74,77 @@
     );
   }
 
+  function isCartButtonText(text) {
+    const normalized = normalizeText(text);
+
+    return (
+      normalized.includes(CART_BUTTON_TEXT) ||
+      normalized.includes(DISABLED_BUTTON_TEXT)
+    );
+  }
+
+  function getPossibleCartButtons(scope) {
+    if (!scope) {
+      return [];
+    }
+
+    return Array.from(
+      scope.querySelectorAll("a, button, [role='button'], .t-btn")
+    );
+  }
+
+  function hasCartButtonInScope(scope) {
+    return getPossibleCartButtons(scope).some(function (el) {
+      if (!isVisible(el)) return false;
+
+      if (el.dataset && el.dataset.konturStockButton === "1") {
+        return true;
+      }
+
+      return isCartButtonText(el.textContent);
+    });
+  }
+
+  function restoreCartButton(button) {
+    if (!button) return;
+
+    const originalText = button.dataset.konturOriginalText || CART_BUTTON_TEXT;
+
+    button.textContent = originalText;
+    button.disabled = false;
+    button.removeAttribute("aria-disabled");
+
+    if (button.dataset.konturOriginalHref) {
+      button.setAttribute("href", button.dataset.konturOriginalHref);
+    }
+
+    if (button.dataset.konturOriginalTabindex === "__none__") {
+      button.removeAttribute("tabindex");
+    } else if (button.dataset.konturOriginalTabindex) {
+      button.setAttribute("tabindex", button.dataset.konturOriginalTabindex);
+    } else {
+      button.removeAttribute("tabindex");
+    }
+
+    button.style.pointerEvents = "";
+    button.style.opacity = "";
+    button.style.cursor = "";
+
+    button.dataset.konturStockDisabled = "0";
+  }
+
+  function resetCartButtons() {
+    document.querySelectorAll("[data-kontur-stock-button='1']").forEach(function (button) {
+      restoreCartButton(button);
+    });
+  }
+
   function removeAllStatuses() {
     document.querySelectorAll("." + STATUS_CLASS).forEach(function (el) {
       el.remove();
     });
+
+    resetCartButtons();
   }
 
   function findProductScope(articleElement) {
@@ -88,15 +158,13 @@
 
       const text = normalizeText(current.textContent);
 
-      if (
-        text.includes("Артикул") &&
-        text.includes("Добавить в корзину") &&
-        (
-          text.includes("Размер") ||
-          text.includes("Цвет") ||
-          text.includes("Материал")
-        )
-      ) {
+      const hasArticle = text.includes("Артикул");
+      const hasOptions =
+        text.includes("Размер") ||
+        text.includes("Цвет") ||
+        text.includes("Материал");
+
+      if (hasArticle && hasOptions && hasCartButtonInScope(current)) {
         return current;
       }
 
@@ -192,6 +260,105 @@
     return statusEl;
   }
 
+  function findCartButton(articleElement) {
+    const scope = findProductScope(articleElement);
+
+    if (!scope) {
+      return null;
+    }
+
+    const candidates = getPossibleCartButtons(scope);
+
+    return candidates.find(function (el) {
+      if (!isVisible(el)) return false;
+
+      if (el.dataset && el.dataset.konturStockButton === "1") {
+        return true;
+      }
+
+      return isCartButtonText(el.textContent);
+    }) || null;
+  }
+
+  function setCartButtonAvailability(articleElement, available) {
+    const button = findCartButton(articleElement);
+
+    if (!button) {
+      return;
+    }
+
+    button.dataset.konturStockButton = "1";
+
+    if (!button.dataset.konturOriginalText) {
+      const currentText = normalizeText(button.textContent);
+
+      button.dataset.konturOriginalText =
+        currentText && currentText !== DISABLED_BUTTON_TEXT
+          ? currentText
+          : CART_BUTTON_TEXT;
+    }
+
+    if (!button.dataset.konturOriginalTabindex) {
+      button.dataset.konturOriginalTabindex = button.hasAttribute("tabindex")
+        ? button.getAttribute("tabindex")
+        : "__none__";
+    }
+
+    if (button.tagName && button.tagName.toLowerCase() === "a") {
+      if (!button.dataset.konturOriginalHref && button.hasAttribute("href")) {
+        button.dataset.konturOriginalHref = button.getAttribute("href");
+      }
+    }
+
+    if (available) {
+      restoreCartButton(button);
+      return;
+    }
+
+    button.textContent = DISABLED_BUTTON_TEXT;
+    button.disabled = true;
+    button.setAttribute("aria-disabled", "true");
+    button.setAttribute("tabindex", "-1");
+
+    /*
+      Не ставим pointer-events: none, потому что тогда клик может уйти
+      в родительские элементы Tilda. Вместо этого блокируем клик
+      через capture-обработчик blockDisabledCartClick().
+    */
+    button.style.pointerEvents = "auto";
+    button.style.opacity = "0.45";
+    button.style.cursor = "not-allowed";
+
+    button.dataset.konturStockDisabled = "1";
+  }
+
+  function blockDisabledCartClick(event) {
+    const target = event.target;
+
+    if (!target || !target.closest) {
+      return;
+    }
+
+    const button = target.closest("[data-kontur-stock-button='1']");
+
+    if (!button) {
+      return;
+    }
+
+    if (button.dataset.konturStockDisabled !== "1") {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+
+    if (typeof event.stopImmediatePropagation === "function") {
+      event.stopImmediatePropagation();
+    }
+
+    return false;
+  }
+
   function setStatus(statusEl, available, text, isUnknown) {
     statusEl.textContent = text;
 
@@ -269,6 +436,7 @@
     const sku = article.sku;
 
     if (statusEl.dataset.sku === sku && statusEl.dataset.loaded === "1") {
+      setCartButtonAvailability(article.element, statusEl.dataset.available === "1");
       return;
     }
 
@@ -282,17 +450,29 @@
 
       if (!isCurrentInstance()) return;
 
-      statusEl.dataset.loaded = "1";
-
+      const available = Boolean(item.available);
       const text = item.displayStatus || STATUS_NOT_AVAILABLE;
-      setStatus(statusEl, Boolean(item.available), text, false);
+
+      statusEl.dataset.loaded = "1";
+      statusEl.dataset.available = available ? "1" : "0";
+
+      setStatus(statusEl, available, text, false);
+      setCartButtonAvailability(article.element, available);
     } catch (error) {
       console.warn("[Kontur stock] Ошибка проверки остатка:", error);
 
       if (!isCurrentInstance()) return;
 
       statusEl.dataset.loaded = "0";
+      statusEl.dataset.available = "1";
+
       setStatus(statusEl, false, STATUS_UNKNOWN, true);
+
+      /*
+        Если API временно недоступен, кнопку не блокируем,
+        чтобы не остановить продажи из-за технической ошибки.
+      */
+      setCartButtonAvailability(article.element, true);
     }
   }
 
@@ -353,6 +533,10 @@
     scheduleUpdate();
     watchUrlChanges();
 
+    document.addEventListener("click", blockDisabledCartClick, true);
+    document.addEventListener("mousedown", blockDisabledCartClick, true);
+    document.addEventListener("touchstart", blockDisabledCartClick, true);
+
     document.body.addEventListener("click", function () {
       scheduleUpdate();
     });
@@ -381,6 +565,7 @@
       apiUrl: STOCK_API_URL,
       debug: function () {
         const article = findBestArticleElement();
+        const button = article ? findCartButton(article.element) : null;
 
         return {
           href: window.location.href,
@@ -392,9 +577,20 @@
                 area: article.area,
               }
             : null,
+          button: button
+            ? {
+                text: normalizeText(button.textContent),
+                disabled: button.disabled === true,
+                ariaDisabled: button.getAttribute("aria-disabled"),
+                stockDisabled: button.dataset.konturStockDisabled,
+              }
+            : null,
           statuses: Array.from(document.querySelectorAll("." + STATUS_CLASS)).map(function (el) {
             return {
               text: normalizeText(el.textContent),
+              sku: el.dataset.sku,
+              loaded: el.dataset.loaded,
+              available: el.dataset.available,
               parentText: normalizeText(el.parentElement ? el.parentElement.textContent : "").slice(0, 200),
             };
           }),
