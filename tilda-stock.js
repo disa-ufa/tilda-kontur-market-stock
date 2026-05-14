@@ -35,9 +35,18 @@
   let rerunRequested = false;
   let lastAppliedSku = "";
   let lastAppliedAvailable = null;
+  let suppressUntil = 0;
 
   function isCurrentInstance() {
     return window.__KonturStockInstanceId === INSTANCE_ID;
+  }
+
+  function suppressUpdates(ms) {
+    suppressUntil = Math.max(suppressUntil, Date.now() + ms);
+  }
+
+  function isSuppressed() {
+    return Date.now() < suppressUntil;
   }
 
   function isProductUrl() {
@@ -110,6 +119,21 @@
       style.display !== "none" &&
       style.visibility !== "hidden" &&
       style.opacity !== "0"
+    );
+  }
+
+  function isCloseControl(target) {
+    if (!target || !target.closest) return false;
+
+    return Boolean(
+      target.closest(".t-popup__close") ||
+      target.closest(".t-popup__close-wrapper") ||
+      target.closest(".t-store__prod-popup__close") ||
+      target.closest(".js-store-close-text") ||
+      target.closest(".js-store-prod-popup-close") ||
+      target.closest("[data-popup-close]") ||
+      target.closest("[aria-label='Close']") ||
+      target.closest("[aria-label='Закрыть']")
     );
   }
 
@@ -305,7 +329,6 @@
       return null;
     }
 
-    const textNodes = [];
     const walker = document.createTreeWalker(
       document.body,
       NodeFilter.SHOW_TEXT,
@@ -322,16 +345,11 @@
       }
     );
 
+    const candidates = [];
     let node;
 
     while ((node = walker.nextNode())) {
-      textNodes.push(node);
-    }
-
-    const candidates = [];
-
-    for (const textNode of textNodes) {
-      const el = textNode.parentElement;
+      const el = node.parentElement;
 
       if (!el) continue;
       if (el.classList && el.classList.contains(STATUS_CLASS)) continue;
@@ -480,6 +498,11 @@
   function blockDisabledCartClick(event) {
     const target = event.target;
 
+    if (isCloseControl(target)) {
+      suppressUpdates(1200);
+      return;
+    }
+
     if (!target || !target.closest) return;
 
     const button = target.closest("[data-kontur-stock-button='1']");
@@ -581,6 +604,7 @@
 
   async function updateStock() {
     if (!isCurrentInstance()) return;
+    if (isSuppressed()) return;
 
     if (updateInProgress) {
       rerunRequested = true;
@@ -650,7 +674,7 @@
     } finally {
       updateInProgress = false;
 
-      if (rerunRequested) {
+      if (rerunRequested && !isSuppressed()) {
         rerunRequested = false;
         setTimeout(updateStockSafe, 300);
       }
@@ -666,6 +690,8 @@
   }
 
   function scheduleUpdate() {
+    if (isSuppressed()) return;
+
     if (!isProductUrl()) {
       removeAllStatuses();
       return;
@@ -684,7 +710,59 @@
     };
   }
 
-  const debouncedUpdate = debounce(updateStockSafe, 400);
+  const debouncedUpdate = debounce(updateStockSafe, 500);
+
+  function shouldScheduleFromUserEvent(event) {
+    const target = event.target;
+
+    if (!isProductUrl()) return false;
+    if (isSuppressed()) return false;
+
+    if (isCloseControl(target)) {
+      suppressUpdates(1200);
+      return false;
+    }
+
+    if (!target || !target.closest) return false;
+
+    if (target.closest("[data-kontur-stock-button='1']")) {
+      return false;
+    }
+
+    const clickable = target.closest("a, button, label, div, span");
+
+    if (!clickable) return false;
+
+    const text = getCleanText(clickable);
+
+    if (
+      text === "S" ||
+      text === "M" ||
+      text === "L" ||
+      text === "XL" ||
+      text === "XXL" ||
+      text === "XXXL"
+    ) {
+      return true;
+    }
+
+    if (
+      text.includes("Размер") ||
+      text.includes("Цвет") ||
+      text.includes("Материал")
+    ) {
+      return true;
+    }
+
+    return Boolean(
+      target.closest(".t-product__option") ||
+      target.closest(".t-product__option-item") ||
+      target.closest(".t-store__prod-popup__option") ||
+      target.closest(".js-product-option-name") ||
+      target.closest(".t-img-select__control") ||
+      target.closest("[data-product-option]")
+    );
+  }
 
   function watchUrlChanges() {
     setInterval(function () {
@@ -694,6 +772,12 @@
         lastHref = window.location.href;
         lastAppliedSku = "";
         lastAppliedAvailable = null;
+
+        if (!isProductUrl()) {
+          removeAllStatuses();
+          return;
+        }
+
         scheduleUpdate();
       }
     }, 700);
@@ -729,24 +813,37 @@
     watchUrlChanges();
 
     document.addEventListener("click", blockDisabledCartClick, true);
-    document.addEventListener("mousedown", blockDisabledCartClick, true);
-    document.addEventListener("touchstart", blockDisabledCartClick, true);
 
-    document.body.addEventListener("click", function () {
+    document.body.addEventListener("click", function (event) {
+      if (!shouldScheduleFromUserEvent(event)) {
+        return;
+      }
+
       lastAppliedSku = "";
       lastAppliedAvailable = null;
       scheduleUpdate();
     });
 
     document.body.addEventListener("change", function () {
+      if (!isProductUrl() || isSuppressed()) {
+        return;
+      }
+
       lastAppliedSku = "";
       lastAppliedAvailable = null;
       scheduleUpdate();
     });
 
     const observer = new MutationObserver(function () {
+      if (isSuppressed()) {
+        return;
+      }
+
       if (!isProductUrl()) {
-        removeAllStatuses();
+        if (lastAppliedSku || document.querySelector("." + STATUS_CLASS)) {
+          removeAllStatuses();
+        }
+
         return;
       }
 
@@ -755,7 +852,7 @@
 
     observer.observe(document.body, {
       childList: true,
-      subtree: true
+      subtree: true,
     });
 
     window.KonturStock = {
@@ -771,6 +868,7 @@
           lastAppliedSku: lastAppliedSku,
           lastAppliedAvailable: lastAppliedAvailable,
           updateInProgress: updateInProgress,
+          suppressed: isSuppressed(),
           article: article
             ? {
                 sku: article.sku,
