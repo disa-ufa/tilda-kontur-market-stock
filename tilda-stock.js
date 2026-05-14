@@ -22,6 +22,8 @@
   const CART_BUTTON_TEXT = "Добавить в корзину";
   const DISABLED_BUTTON_TEXT = "Нет в наличии";
 
+  const CLIENT_CACHE_TTL_MS = 60 * 1000;
+
   window.__KonturStockCache = window.__KonturStockCache || new Map();
   window.__KonturStockPending = window.__KonturStockPending || new Map();
 
@@ -29,6 +31,10 @@
   const pending = window.__KonturStockPending;
 
   let lastHref = window.location.href;
+  let updateInProgress = false;
+  let rerunRequested = false;
+  let lastAppliedSku = "";
+  let lastAppliedAvailable = null;
 
   function isCurrentInstance() {
     return window.__KonturStockInstanceId === INSTANCE_ID;
@@ -119,29 +125,16 @@
   function sanitizeButtonText(text) {
     const normalized = normalizeText(text);
 
-    if (!normalized) {
-      return CART_BUTTON_TEXT;
-    }
-
-    if (normalized.includes(CART_BUTTON_TEXT)) {
-      return CART_BUTTON_TEXT;
-    }
-
-    if (normalized.includes(DISABLED_BUTTON_TEXT)) {
-      return CART_BUTTON_TEXT;
-    }
-
-    if (normalized.length > 60) {
-      return CART_BUTTON_TEXT;
-    }
+    if (!normalized) return CART_BUTTON_TEXT;
+    if (normalized.includes(CART_BUTTON_TEXT)) return CART_BUTTON_TEXT;
+    if (normalized.includes(DISABLED_BUTTON_TEXT)) return CART_BUTTON_TEXT;
+    if (normalized.length > 60) return CART_BUTTON_TEXT;
 
     return normalized;
   }
 
   function getPossibleCartButtons(scope) {
-    if (!scope) {
-      return [];
-    }
+    if (!scope) return [];
 
     return Array.from(
       scope.querySelectorAll("a, button, [role='button'], .t-btn")
@@ -212,9 +205,7 @@
 
       const text = getCleanText(el);
 
-      if (!isCartButtonText(text)) {
-        return false;
-      }
+      if (!isCartButtonText(text)) return false;
 
       return text.length <= 120;
     });
@@ -261,6 +252,9 @@
     });
 
     resetCartButtons();
+
+    lastAppliedSku = "";
+    lastAppliedAvailable = null;
   }
 
   function findProductScope(articleElement) {
@@ -311,10 +305,35 @@
       return null;
     }
 
-    const elements = Array.from(document.querySelectorAll("body *"));
+    const textNodes = [];
+    const walker = document.createTreeWalker(
+      document.body,
+      NodeFilter.SHOW_TEXT,
+      {
+        acceptNode: function (node) {
+          const value = normalizeText(node.textContent);
+
+          if (!value.includes("Артикул")) {
+            return NodeFilter.FILTER_REJECT;
+          }
+
+          return NodeFilter.FILTER_ACCEPT;
+        },
+      }
+    );
+
+    let node;
+
+    while ((node = walker.nextNode())) {
+      textNodes.push(node);
+    }
+
     const candidates = [];
 
-    for (const el of elements) {
+    for (const textNode of textNodes) {
+      const el = textNode.parentElement;
+
+      if (!el) continue;
       if (el.classList && el.classList.contains(STATUS_CLASS)) continue;
       if (!isVisible(el)) continue;
 
@@ -337,7 +356,6 @@
     }
 
     if (!candidates.length) {
-      removeAllStatuses();
       return null;
     }
 
@@ -379,9 +397,7 @@
   function findCartButton(articleElement) {
     const scope = findProductScope(articleElement);
 
-    if (!scope) {
-      return null;
-    }
+    if (!scope) return null;
 
     const candidates = getPossibleCartButtons(scope)
       .filter(function (el) {
@@ -393,9 +409,7 @@
 
         const text = getCleanText(el);
 
-        if (!isCartButtonText(text)) {
-          return false;
-        }
+        if (!isCartButtonText(text)) return false;
 
         return text.length <= 120;
       })
@@ -409,9 +423,7 @@
         };
       });
 
-    if (!candidates.length) {
-      return null;
-    }
+    if (!candidates.length) return null;
 
     candidates.sort(function (a, b) {
       return a.area - b.area || a.text.length - b.text.length;
@@ -423,9 +435,7 @@
   function setCartButtonAvailability(articleElement, available) {
     const button = findCartButton(articleElement);
 
-    if (!button) {
-      return;
-    }
+    if (!button) return;
 
     button.dataset.konturStockButton = "1";
 
@@ -470,19 +480,13 @@
   function blockDisabledCartClick(event) {
     const target = event.target;
 
-    if (!target || !target.closest) {
-      return;
-    }
+    if (!target || !target.closest) return;
 
     const button = target.closest("[data-kontur-stock-button='1']");
 
-    if (!button) {
-      return;
-    }
+    if (!button) return;
 
-    if (button.dataset.konturStockDisabled !== "1") {
-      return;
-    }
+    if (button.dataset.konturStockDisabled !== "1") return;
 
     event.preventDefault();
     event.stopPropagation();
@@ -505,9 +509,31 @@
     statusEl.style.color = available ? "#248a3d" : "#b3261e";
   }
 
+  function getCachedStock(sku) {
+    const cached = cache.get(sku);
+
+    if (!cached) return null;
+
+    if (Date.now() - cached.savedAt > CLIENT_CACHE_TTL_MS) {
+      cache.delete(sku);
+      return null;
+    }
+
+    return cached.value;
+  }
+
+  function setCachedStock(sku, value) {
+    cache.set(sku, {
+      savedAt: Date.now(),
+      value: value,
+    });
+  }
+
   function fetchStock(sku) {
-    if (cache.has(sku)) {
-      return Promise.resolve(cache.get(sku));
+    const cached = getCachedStock(sku);
+
+    if (cached) {
+      return Promise.resolve(cached);
     }
 
     if (pending.has(sku)) {
@@ -538,7 +564,7 @@
             displayStatus: STATUS_NOT_AVAILABLE,
           };
 
-        cache.set(sku, result);
+        setCachedStock(sku, result);
         pending.delete(sku);
 
         return result;
@@ -556,31 +582,42 @@
   async function updateStock() {
     if (!isCurrentInstance()) return;
 
-    if (!isProductUrl()) {
-      removeAllStatuses();
+    if (updateInProgress) {
+      rerunRequested = true;
       return;
     }
 
-    const article = findBestArticleElement();
-
-    if (!article) {
-      return;
-    }
-
-    const statusEl = ensureStatusElement(article.element);
-    const sku = article.sku;
-
-    if (statusEl.dataset.sku === sku && statusEl.dataset.loaded === "1") {
-      setCartButtonAvailability(article.element, statusEl.dataset.available === "1");
-      return;
-    }
-
-    statusEl.dataset.sku = sku;
-    statusEl.dataset.loaded = "0";
-    statusEl.textContent = STATUS_LOADING;
-    statusEl.style.color = "#777";
+    updateInProgress = true;
 
     try {
+      if (!isProductUrl()) {
+        removeAllStatuses();
+        return;
+      }
+
+      const article = findBestArticleElement();
+
+      if (!article) {
+        return;
+      }
+
+      const statusEl = ensureStatusElement(article.element);
+      const sku = article.sku;
+
+      if (
+        sku === lastAppliedSku &&
+        statusEl.dataset.loaded === "1" &&
+        lastAppliedAvailable !== null
+      ) {
+        setCartButtonAvailability(article.element, lastAppliedAvailable);
+        return;
+      }
+
+      statusEl.dataset.sku = sku;
+      statusEl.dataset.loaded = "0";
+      statusEl.textContent = STATUS_LOADING;
+      statusEl.style.color = "#777";
+
       const item = await fetchStock(sku);
 
       if (!isCurrentInstance()) return;
@@ -591,19 +628,32 @@
       statusEl.dataset.loaded = "1";
       statusEl.dataset.available = available ? "1" : "0";
 
+      lastAppliedSku = sku;
+      lastAppliedAvailable = available;
+
       setStatus(statusEl, available, text, false);
       setCartButtonAvailability(article.element, available);
     } catch (error) {
       console.warn("[Kontur stock] Ошибка проверки остатка:", error);
 
-      if (!isCurrentInstance()) return;
+      const article = findBestArticleElement();
+
+      if (!article) return;
+
+      const statusEl = ensureStatusElement(article.element);
 
       statusEl.dataset.loaded = "0";
       statusEl.dataset.available = "1";
 
       setStatus(statusEl, false, STATUS_UNKNOWN, true);
-
       setCartButtonAvailability(article.element, true);
+    } finally {
+      updateInProgress = false;
+
+      if (rerunRequested) {
+        rerunRequested = false;
+        setTimeout(updateStockSafe, 300);
+      }
     }
   }
 
@@ -616,10 +666,13 @@
   }
 
   function scheduleUpdate() {
-    setTimeout(updateStockSafe, 150);
-    setTimeout(updateStockSafe, 500);
-    setTimeout(updateStockSafe, 1000);
-    setTimeout(updateStockSafe, 1800);
+    if (!isProductUrl()) {
+      removeAllStatuses();
+      return;
+    }
+
+    setTimeout(updateStockSafe, 200);
+    setTimeout(updateStockSafe, 900);
   }
 
   function debounce(fn, delay) {
@@ -631,7 +684,7 @@
     };
   }
 
-  const debouncedUpdate = debounce(updateStockSafe, 250);
+  const debouncedUpdate = debounce(updateStockSafe, 400);
 
   function watchUrlChanges() {
     setInterval(function () {
@@ -639,20 +692,26 @@
 
       if (window.location.href !== lastHref) {
         lastHref = window.location.href;
+        lastAppliedSku = "";
+        lastAppliedAvailable = null;
         scheduleUpdate();
       }
-    }, 400);
+    }, 700);
 
     const originalPushState = history.pushState;
     const originalReplaceState = history.replaceState;
 
     history.pushState = function () {
       originalPushState.apply(this, arguments);
+      lastAppliedSku = "";
+      lastAppliedAvailable = null;
       scheduleUpdate();
     };
 
     history.replaceState = function () {
       originalReplaceState.apply(this, arguments);
+      lastAppliedSku = "";
+      lastAppliedAvailable = null;
       scheduleUpdate();
     };
 
@@ -661,7 +720,12 @@
   }
 
   function initKonturStock() {
-    scheduleUpdate();
+    if (!isProductUrl()) {
+      removeAllStatuses();
+    } else {
+      scheduleUpdate();
+    }
+
     watchUrlChanges();
 
     document.addEventListener("click", blockDisabledCartClick, true);
@@ -669,10 +733,14 @@
     document.addEventListener("touchstart", blockDisabledCartClick, true);
 
     document.body.addEventListener("click", function () {
+      lastAppliedSku = "";
+      lastAppliedAvailable = null;
       scheduleUpdate();
     });
 
     document.body.addEventListener("change", function () {
+      lastAppliedSku = "";
+      lastAppliedAvailable = null;
       scheduleUpdate();
     });
 
@@ -687,8 +755,7 @@
 
     observer.observe(document.body, {
       childList: true,
-      subtree: true,
-      characterData: true,
+      subtree: true
     });
 
     window.KonturStock = {
@@ -701,6 +768,9 @@
         return {
           href: window.location.href,
           isProductUrl: isProductUrl(),
+          lastAppliedSku: lastAppliedSku,
+          lastAppliedAvailable: lastAppliedAvailable,
+          updateInProgress: updateInProgress,
           article: article
             ? {
                 sku: article.sku,
