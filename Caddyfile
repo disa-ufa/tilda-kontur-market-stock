@@ -1,0 +1,4 @@
+149-154-67-63.sslip.io {
+    encode gzip
+    reverse_proxy stock-proxy:8000
+}

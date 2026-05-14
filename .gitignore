@@ -1,0 +1,26 @@
+﻿# secrets
+.env
+*.env
+
+# python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# local debug / generated files
+kontur_debug/
+reports/
+deploy.tar.gz
+Dockerfile.txt
+
+# local diagnostic scripts
+kontur_probe.py
+inspect_kontur.py
+make_inventory_report.py
+
+# system/editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
