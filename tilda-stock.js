@@ -403,7 +403,7 @@
       statusEl.style.fontSize = "15px";
       statusEl.style.fontWeight = "600";
       statusEl.style.lineHeight = "1.4";
-      statusEl.style.display = "block";
+      statusEl.style.display = "none";
       statusEl.style.position = "static";
 
       articleElement.insertAdjacentElement("afterend", statusEl);
@@ -521,15 +521,23 @@
     return false;
   }
 
-  function setStatus(statusEl, available, text, isUnknown) {
-    statusEl.textContent = text;
-
+  function setStatus(statusEl, available, isUnknown) {
     if (isUnknown) {
+      statusEl.textContent = "";
+      statusEl.style.display = "none";
       statusEl.style.color = "#777";
       return;
     }
 
-    statusEl.style.color = available ? "#248a3d" : "#b3261e";
+    if (available) {
+      statusEl.textContent = "";
+      statusEl.style.display = "none";
+      return;
+    }
+
+    statusEl.textContent = STATUS_NOT_AVAILABLE;
+    statusEl.style.display = "block";
+    statusEl.style.color = "#b3261e";
   }
 
   function getCachedStock(sku) {
@@ -633,13 +641,15 @@
         statusEl.dataset.loaded === "1" &&
         lastAppliedAvailable !== null
       ) {
+        setStatus(statusEl, lastAppliedAvailable, false);
         setCartButtonAvailability(article.element, lastAppliedAvailable);
         return;
       }
 
       statusEl.dataset.sku = sku;
       statusEl.dataset.loaded = "0";
-      statusEl.textContent = STATUS_LOADING;
+      statusEl.textContent = "";
+      statusEl.style.display = "none";
       statusEl.style.color = "#777";
 
       const item = await fetchStock(sku);
@@ -647,7 +657,6 @@
       if (!isCurrentInstance()) return;
 
       const available = Boolean(item.available);
-      const text = item.displayStatus || STATUS_NOT_AVAILABLE;
 
       statusEl.dataset.loaded = "1";
       statusEl.dataset.available = available ? "1" : "0";
@@ -655,7 +664,7 @@
       lastAppliedSku = sku;
       lastAppliedAvailable = available;
 
-      setStatus(statusEl, available, text, false);
+      setStatus(statusEl, available, false);
       setCartButtonAvailability(article.element, available);
     } catch (error) {
       console.warn("[Kontur stock] Ошибка проверки остатка:", error);
@@ -669,7 +678,7 @@
       statusEl.dataset.loaded = "0";
       statusEl.dataset.available = "1";
 
-      setStatus(statusEl, false, STATUS_UNKNOWN, true);
+      setStatus(statusEl, true, true);
       setCartButtonAvailability(article.element, true);
     } finally {
       updateInProgress = false;
@@ -891,6 +900,7 @@
               sku: el.dataset.sku,
               loaded: el.dataset.loaded,
               available: el.dataset.available,
+              visible: el.style.display !== "none",
               parentText: getCleanText(el.parentElement).slice(0, 200),
             };
           }),
